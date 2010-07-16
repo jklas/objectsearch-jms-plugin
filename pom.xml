@@ -10,6 +10,12 @@
 	<name>search-jms-plugin</name>
 	<url>http://maven.apache.org</url>
 
+	 <scm>
+		<connection>scm:git:ssh://jklas@modelsearch.git.sourceforge.net/gitroot/modelsearch/search-jms-plugin.git</connection>
+		<url>scm:git:ssh://jklas@modelsearch.git.sourceforge.net/gitroot/modelsearch/search-jms-plugin.git</url>
+		<developerConnection>scm:git:ssh://jklas@modelsearch.git.sourceforge.net/gitroot/modelsearch/search-jms-plugin.git</developerConnection>	
+	</scm>
+
 	<build>
 		<plugins>
 			<plugin>
@@ -28,8 +34,13 @@
 				<artifactId>tomcat-maven-plugin</artifactId>
 				<version>1.0</version>
 			</plugin>
+		      	<plugin>
+        			<groupId>org.apache.maven.plugins</groupId>
+			        <artifactId>maven-release-plugin</artifactId>
+			       <version>2.0</version>
+			</plugin>
 		</plugins>
-	</build>
+	 </build>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
