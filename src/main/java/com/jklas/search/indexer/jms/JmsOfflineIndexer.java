@@ -1,110 +1,197 @@
+/**
+ * Object Search Framework
+ *
+ * Copyright (C) 2010 Julian Klas
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
 package com.jklas.search.indexer.jms;
 
-import java.util.List;
+import java.io.Serializable;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
 
-import com.jklas.search.exception.IndexObjectException;
-import com.jklas.search.index.dto.IndexObjectDto;
-import com.jklas.search.indexer.IndexerAction;
-import com.jklas.search.indexer.IndexerService;
-import com.jklas.search.util.SearchLibrary;
+import javax.jms.Connection;
+import javax.jms.DeliveryMode;
+import javax.jms.Destination;
+import javax.jms.JMSException;
+import javax.jms.MessageProducer;
+import javax.jms.ObjectMessage;
+import javax.jms.Session;
 
-public class JmsOfflineIndexer implements IndexerService {
+import org.apache.activemq.ActiveMQConnectionFactory;
 
-	private final JmsOfflineIndexerProducer producer;
+public class JmsOfflineIndexerProducer implements Runnable {
+
+	private LinkedBlockingQueue<Serializable> sendQueue = new LinkedBlockingQueue<Serializable>();
+
+	private Destination destination;
+	private boolean verbose = true;
+	private long timeToLive;
+	private String subject = "SEARCH.ALL_INDEXES";
+	private boolean transacted;
+	private boolean persistent = false;
+
+	private String producerName;
+
+	private final ActiveMQConnectionFactory connectionFactory;
+	private Session session;
+	private MessageProducer producer;
+	private boolean shutdown = false;
+
+	private Connection connection;
+
+	private int countToStop;
+
+	private int sentCount = 0;
+
+	public JmsOfflineIndexerProducer(String name, ActiveMQConnectionFactory connectionFactory) {
+		this.producerName = name;
+		this.connectionFactory = connectionFactory;
+	}
+
+	@Override
+	public void run() {
+		try {
+			try {
+				startup();
+			} catch (JMSException e) {
+				e.printStackTrace();
+				shutdown = true;
+			}
+
+			while(!shutdown) {
+				try {
+
+					if(sentCount >= countToStop ) {
+						shutdown = true;					
+					} else {
+						acceptAndSend();						
+					}
+
+				} catch (InterruptedException e) {
+
+				}
+			}
+		} finally {
+			try {					
+				if(producer!=null) producer.close();
+				if(session!=null) session.close();
+				if(connection!=null) connection.close();
+			} catch (JMSException ignore) {
+				ignore.printStackTrace();
+			}
+		}
+
+	}
+
+	private void acceptAndSend() throws InterruptedException {
+		Serializable objectToSend = sendQueue.take();
+		send(objectToSend);
+	}
+
+	public void startup() throws JMSException {
+		this.connection = null;
 		
-	public JmsOfflineIndexer(JmsOfflineIndexerProducer producer) {
-		this.producer = producer;
+		this.connection = connectionFactory.createConnection();
+		this.connection.start();
+
+		this.session = connection.createSession(transacted, Session.AUTO_ACKNOWLEDGE);
+		this.destination = session.createQueue(subject);
+
+		// Create the producer.
+		this.producer = session.createProducer(destination);
+		
+		if (persistent) {
+			producer.setDeliveryMode(DeliveryMode.PERSISTENT);
+		} else {
+			producer.setDeliveryMode(DeliveryMode.NON_PERSISTENT);
+		}
+
+		if (timeToLive != 0) {
+			producer.setTimeToLive(timeToLive);
+		}
+		
+	}
+
+	private void log(String msg) {
+//		System.out.println(msg);
+	}
+
+	public void send(Serializable objectToSend) {
+		try {
+
+			ObjectMessage message;
+			message = session.createObjectMessage(objectToSend);
+
+			if (verbose) {
+				String msg = message.getObject().toString();
+				if (msg.length() > 50) {
+					msg = msg.substring(0, 50) + "...";
+				}
+				log("["+producerName+"]: " + msg);
+			}
+
+			producer.send(message);
+
+			this.sentCount ++;
+
+
+			if (transacted) {
+				session.commit();
+			}
+
+
+		} catch (JMSException e) {
+			throw new RuntimeException("JMS Exception, nesting...",e);
+		}
+	}
+
+	public void setShutdown(boolean shutdown) {
+		this.shutdown = shutdown;
+	}
+
+	public Queue<Serializable> getSendQueue() {
+		return sendQueue;
+	}
+
+	public void stopWhenSentCountReaches(int count) {
+		this.countToStop = count;
+	}
+
+	public int getUnsentMessageCount() {		
+		return sendQueue.size();
+	}
+
+	public int getSentCount() {
+		return sentCount;
 	}
 	
-	@Override
-	public void create(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE, indexObjectDto));	
+	public void setPersistent(boolean persistent) {
+		this.persistent = persistent;
 	}
-
-
-	@Override
-	public void createOrUpdate(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE_OR_UPDATE, indexObjectDto));		
+	
+	public boolean isPersistent() {
+		return persistent;
 	}
-
-
-	@Override
-	public void delete(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.DELETE, indexObjectDto));
+	
+	public void setSubject(String subject) {
+		this.subject = subject;
 	}
-
-
-	@Override
-	public void update(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.UPDATE, indexObjectDto));
+	
+	public String getSubject() {
+		return subject;
 	}
-			
-	@Override
-	public void create(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void createOrUpdate(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE_OR_UPDATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void delete(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.DELETE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void update(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.UPDATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void bulkCreate(List<?> entities) throws IndexObjectException {		
-		for (Object entity : entities) {
-			create(entity);
-		}
-	}
-
-	@Override
-	public void bulkCreateOrUpdate(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			createOrUpdate(entity);
-		}
-	}
-
-	@Override
-	public void bulkDelete(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			delete(entity);
-		}
-	}
-
-	@Override
-	public void bulkDtoCreate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkCreate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
-	}
-
-	@Override
-	public void bulkDtoCreateOrUpdate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkCreateOrUpdate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
-	}
-
-	@Override
-	public void bulkDtoDelete(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkDelete(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
-	}
-
-	@Override
-	public void bulkDtoUpdate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkUpdate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
-	}
-
-	@Override
-	public void bulkUpdate(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			update(entity);
-		}
-	}
-
 }

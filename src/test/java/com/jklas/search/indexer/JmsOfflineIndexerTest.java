@@ -1,145 +1,114 @@
+/**
+ * Object Search Framework
+ *
+ * Copyright (C) 2010 Julian Klas
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
 package com.jklas.search.indexer;
 
 import java.io.Serializable;
+import java.util.Arrays;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
-import org.apache.activemq.ActiveMQConnectionFactory;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
-import com.jklas.search.indexer.Utils;
+import com.jklas.search.annotations.Indexable;
+import com.jklas.search.annotations.SearchField;
+import com.jklas.search.annotations.SearchFilter;
+import com.jklas.search.annotations.SearchId;
+import com.jklas.search.configuration.AnnotationConfigurationMapper;
 import com.jklas.search.exception.IndexObjectException;
 import com.jklas.search.exception.SearchEngineMappingException;
-import com.jklas.search.index.dto.IndexObjectDto;
 import com.jklas.search.index.memory.MemoryIndex;
 import com.jklas.search.index.memory.MemoryIndexWriterFactory;
-import com.jklas.search.indexer.DefaultIndexerService;
-import com.jklas.search.indexer.IndexerService;
-import com.jklas.search.indexer.jms.JmsOfflineIndexer;
-import com.jklas.search.indexer.jms.JmsOfflineIndexerConsumer;
-import com.jklas.search.indexer.jms.JmsOfflineIndexerProducer;
 import com.jklas.search.indexer.pipeline.DefaultIndexingPipeline;
+import com.jklas.search.util.SearchLibrary;
 
-public class JmsOfflineIndexerTest {
+public class Utils {
 
-	private static ActiveMQConnectionFactory connectionFactory = null; 
+	public static void setupSampleMemoryIndex(Object... entities) {
+		MemoryIndex.newDefaultIndex();
+		for (int i = 0; i < entities.length; i++) {
+			try {
+				AnnotationConfigurationMapper.configureAndMap(entities[i], true);
+			} catch (SearchEngineMappingException e) {
+				Assert.fail();
+				throw new RuntimeException("this shouldn't happened.. mapping failed!",e);
+			}
+
+			DefaultIndexerService dis = new DefaultIndexerService(
+					new DefaultIndexingPipeline(),
+					MemoryIndexWriterFactory.getInstance());
+
+			try {
+				dis.bulkCreate(Arrays.asList(entities[i]));				
+			} catch (IndexObjectException e) {
+				Assert.fail();
+				throw new RuntimeException("this shouldn't happened.. can't construct IndexObjectDto",e);
+			}
+
+		}
+	} 
 	
-	@BeforeClass
-	public static void cleanUpQueues() {
-        connectionFactory = new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
+	public static void configureAndMap(Object entity) throws SearchEngineMappingException {
+		SearchLibrary.configureAndMap(entity);	
 	}
 	
-	@Test
-	public void OneObjectsSentIsReceived() throws InterruptedException, IndexObjectException {
-		
-		int numberOfObjectsToSend = 1;
-		Serializable[] entities = new Serializable[numberOfObjectsToSend];
-		Serializable[] ids = new Serializable[numberOfObjectsToSend];
-		
-		for (int i = 0; i < entities.length; i++) {
-			entities[i]= new Utils.SingleAttributeEntity(i,"Julian" +i);
-			ids[i]=i;
-		}
-		
-		sendEntitiesOverJms(entities, ids);
-    }
-
-	@Test
-	public void TenObjectsSentAreReceived() throws InterruptedException, IndexObjectException {
-		
-		int numberOfObjectsToSend = 10;
-		Serializable[] entities = new Serializable[numberOfObjectsToSend];
-		Serializable[] ids = new Serializable[numberOfObjectsToSend];
-		
-		for (int i = 0; i < entities.length; i++) {
-			entities[i]= new Utils.SingleAttributeEntity(i,"Julian" +i);
-			ids[i]=i;
-		}
-		
-		sendEntitiesOverJms(entities, ids);
-    }
-	
-	@Test
-	public void TenObjectsSentAreIndexed() throws InterruptedException, IndexObjectException, SearchEngineMappingException {
-		
-		int numberOfObjectsToSend = 10;
-		Serializable[] entities = new Serializable[numberOfObjectsToSend];
-		Serializable[] ids = new Serializable[numberOfObjectsToSend];
-		
-		
-		for (int i = 0; i < entities.length; i++) {
-			entities[i]= new Utils.SingleAttributeEntity(i,"Julian" +i);
-			ids[i]=i;
-		}
-		Utils.configureAndMap(entities[0]);
-		
-		sendEntitiesOverJmsForIndexing(entities, ids,
-				new DefaultIndexerService(
-						new DefaultIndexingPipeline(),
-						MemoryIndexWriterFactory.getInstance())
-			);
-		
-		Assert.assertEquals(10, MemoryIndex.getDefaultIndex().getObjectCount());
-    }
-	
-	private void sendEntitiesOverJms(Serializable[] entities, Serializable[] ids) throws IndexObjectException, InterruptedException {
-		JmsOfflineIndexerProducer tom = new JmsOfflineIndexerProducer("Tom",connectionFactory);
-    	JmsOfflineIndexerConsumer jerry = new JmsOfflineIndexerConsumer("Jerry",connectionFactory);
-        
-        JmsOfflineIndexer offlineIndexer = new JmsOfflineIndexer(tom);
-                
-        Thread tomThread = new Thread(tom);
-        tomThread.setName("Tom");
-		tom.stopWhenSentCountReaches(entities.length);
-		tomThread.start();
-        
-		Thread jerryThread = new Thread(jerry);
-		jerryThread.setName("Jerry");		
-		jerry.stopWhenReceivedCountReaches(entities.length);
-		jerryThread.start();
-        
-		for (int i = 0; i < entities.length; i++) {			
-			offlineIndexer.create(new IndexObjectDto(entities[i],ids[i]));
-		}
-								
-		tomThread.join();
-		Assert.assertEquals(0, tom.getUnsentMessageCount());
-		Assert.assertEquals(entities.length, tom.getSentCount());
-		
-		jerryThread.join();
-				
-		Assert.assertEquals(entities.length, jerry.getReceivedCount());
+	public static void configureAndMap(Class<?> clazz) throws SearchEngineMappingException {
+		SearchLibrary.configureAndMap(clazz);
 	}
-
-	private void sendEntitiesOverJmsForIndexing(Serializable[] entities, Serializable[] ids, IndexerService indexerService) throws IndexObjectException, InterruptedException {
-		JmsOfflineIndexerProducer tom = new JmsOfflineIndexerProducer("Tom",connectionFactory);
-    	JmsOfflineIndexerConsumer jerry = new JmsOfflineIndexerConsumer("Jerry",connectionFactory,indexerService);
-        
-        JmsOfflineIndexer offlineIndexer = new JmsOfflineIndexer(tom);
-                
-        Thread tomThread = new Thread(tom);
-        tomThread.setName("Tom");
-		tom.stopWhenSentCountReaches(entities.length);
-		tomThread.start();
-        
-		Thread jerryThread = new Thread(jerry);
-		jerryThread.setName("Jerry");		
-		jerry.stopWhenReceivedCountReaches(entities.length);
-		jerryThread.start();
-        
-		for (int i = 0; i < entities.length; i++) {			
-			offlineIndexer.create(new IndexObjectDto(entities[i],ids[i]));
-		}
-								
-		tomThread.join();
-		Assert.assertEquals(0, tom.getUnsentMessageCount());
-		Assert.assertEquals(entities.length, tom.getSentCount());
+	
+	@Indexable
+	public static class SingleAttributeEntity implements Serializable {
+		private static final long serialVersionUID = 5670740052272852510L;
 		
-		jerryThread.join();
-				
-		Assert.assertEquals(entities.length, jerry.getReceivedCount());
+		@SearchId public final int id;
+		@SearchField public final String attribute;
+		public SingleAttributeEntity(int id, String attribute) {
+			this.id = id;
+			this.attribute = attribute;
+		}
 	}
-
+	
+	@Indexable
+	public static class DoubleAttributeEntity implements Serializable {
+	
+		private static final long serialVersionUID = -4005169601782127006L;
+		
+		@SearchId public final int id;
+		@SearchField public final String a1;
+		@SearchField public final String a2;
+		
+		public DoubleAttributeEntity(int id, String a1, String a2) {
+			this.id = id;
+			this.a1 = a1;
+			this.a2 = a2;
+		}
+	}
+	
+	@Indexable
+	public static class DoubleAttributeFiltrableEntity {
+		@SearchId public final int id;
+		@SearchFilter @SearchField public final String a1;
+		@SearchFilter @SearchField public final String a2;
+		
+		public DoubleAttributeFiltrableEntity(int id, String a1, String a2) {
+			this.id = id;
+			this.a1 = a1;
+			this.a2 = a2;
+		}
+	}
 	
 }
