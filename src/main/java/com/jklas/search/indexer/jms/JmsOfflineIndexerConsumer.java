@@ -1,129 +1,196 @@
-/**
- * Object Search Framework
- *
- * Copyright (C) 2010 Julian Klas
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- */
 package com.jklas.search.indexer.jms;
 
-import java.util.List;
+import javax.jms.Connection;
+import javax.jms.DeliveryMode;
+import javax.jms.Destination;
+import javax.jms.ExceptionListener;
+import javax.jms.JMSException;
+import javax.jms.Message;
+import javax.jms.MessageConsumer;
+import javax.jms.MessageProducer;
+import javax.jms.ObjectMessage;
+import javax.jms.Session;
+
+import org.apache.activemq.ActiveMQConnectionFactory;
 
 import com.jklas.search.exception.IndexObjectException;
-import com.jklas.search.index.dto.IndexObjectDto;
-import com.jklas.search.indexer.IndexerAction;
 import com.jklas.search.indexer.IndexerService;
-import com.jklas.search.util.SearchLibrary;
 
-public class JmsOfflineIndexer implements IndexerService {
+public class JmsOfflineIndexerConsumer implements ExceptionListener, Runnable {
 
-	private final JmsOfflineIndexerProducer producer;
-		
-	public JmsOfflineIndexer(JmsOfflineIndexerProducer producer) {
-		this.producer = producer;
+	private final IndexerService indexerService;
+	private final boolean indexIncomingObjects;
+	
+	private boolean running;
+	private Session session;
+	private Destination destination;
+	private MessageProducer replyProducer;	
+	private String subject = "SEARCH.ALL_INDEXES";	
+	private boolean transacted;
+	private boolean durable;
+	private String clientId;
+	private int ackMode = Session.AUTO_ACKNOWLEDGE;
+	private ActiveMQConnectionFactory connectionFactory;
+	private int receivedCount;
+	private boolean shutdown = false;
+	private Connection connection = null;
+	private MessageConsumer consumer = null;
+	private int countToStop;
+	
+	public JmsOfflineIndexerConsumer(String name, ActiveMQConnectionFactory connectionFactory) {
+		this.connectionFactory = connectionFactory;
+		this.indexerService = null;
+		this.indexIncomingObjects = false;
 	}
 	
-	@Override
-	public void create(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE, indexObjectDto));	
+	public JmsOfflineIndexerConsumer(String name, ActiveMQConnectionFactory connectionFactory, IndexerService indexerService) {
+		this.connectionFactory = connectionFactory;
+		this.indexerService = indexerService;
+		this.indexIncomingObjects = true;
 	}
 
 
 	@Override
-	public void createOrUpdate(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE_OR_UPDATE, indexObjectDto));		
-	}
+	public void run() {
+		try {
+			startup();
+		} catch (JMSException e) {			
+			e.printStackTrace();
+			shutdown = true;			
+		}
 
+		try{
+			while(!shutdown ) {
+				try {
+					read();					
+				} catch (JMSException e) {					
+					shutdown = true;
+					e.printStackTrace();
+				}
+			}
+		} finally {
+			try {
+				if(consumer!=null) consumer.close();
 
-	@Override
-	public void delete(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.DELETE, indexObjectDto));
-	}
+				if(session!=null) session.close();
 
-
-	@Override
-	public void update(IndexObjectDto indexObjectDto) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.UPDATE, indexObjectDto));
-	}
-			
-	@Override
-	public void create(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void createOrUpdate(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.CREATE_OR_UPDATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void delete(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.DELETE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void update(Object entity) throws IndexObjectException {
-		producer.getSendQueue().add(new JmsIndexPDU(IndexerAction.UPDATE, new IndexObjectDto(entity)));
-	}
-
-	@Override
-	public void bulkCreate(List<?> entities) throws IndexObjectException {		
-		for (Object entity : entities) {
-			create(entity);
+				if(connection!=null) connection.close();
+			} catch (JMSException ignore) {
+				ignore.printStackTrace();
+			}				
 		}
 	}
 
-	@Override
-	public void bulkCreateOrUpdate(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			createOrUpdate(entity);
+
+	protected void startup() throws JMSException {
+		running = true;
+
+		this.connection = connectionFactory.createConnection();
+		if (durable && clientId != null && clientId.length() > 0 && !"null".equals(clientId)) {
+			connection.setClientID(clientId);
+		}
+
+		connection.setExceptionListener(this);
+		connection.start();
+
+		session = connection.createSession(transacted, ackMode);
+
+		destination = session.createQueue(subject);
+
+		replyProducer = session.createProducer(null);
+		replyProducer.setDeliveryMode(DeliveryMode.NON_PERSISTENT);
+
+		consumer = session.createConsumer(destination);
+	}
+
+	private void log(String x) {
+		//		System.out.println(x);
+	}
+
+
+	public synchronized void onException(JMSException ex) {
+		log("JMS Exception occured.  Shutting down client.");
+		running = false;
+	}
+
+	synchronized boolean isRunning() {
+		return running;
+	}
+
+	private void read() throws JMSException {
+		if(receivedCount >= this.countToStop) {
+			shutdown = true;
+			return;
+		}
+
+		Message message = consumer.receive();
+
+		this.receivedCount ++;
+
+		if(indexIncomingObjects) {			
+			if (message instanceof ObjectMessage) {
+				ObjectMessage objMsg = (ObjectMessage)message;
+				
+				JmsIndexPDU pdu = (JmsIndexPDU )objMsg.getObject();
+				
+				try {
+					pdu.getAction().execute(indexerService, pdu.getIndexObjectDto());
+				} catch (IndexObjectException e) {
+					log(e);
+				}
+			}       
+		}
+		
+
+		if (transacted) {
+			session.commit();
+		} else if (ackMode == Session.CLIENT_ACKNOWLEDGE) {
+			message.acknowledge();
 		}
 	}
 
-	@Override
-	public void bulkDelete(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			delete(entity);
+	private void log(IndexObjectException e) {
+		// TODO Auto-generated method stub
+		
+	}
+
+	public void setAckMode(String ackMode) {
+		if ("CLIENT_ACKNOWLEDGE".equals(ackMode)) {
+			this.ackMode = Session.CLIENT_ACKNOWLEDGE;
+		}
+		if ("AUTO_ACKNOWLEDGE".equals(ackMode)) {
+			this.ackMode = Session.AUTO_ACKNOWLEDGE;
+		}
+		if ("DUPS_OK_ACKNOWLEDGE".equals(ackMode)) {
+			this.ackMode = Session.DUPS_OK_ACKNOWLEDGE;
+		}
+		if ("SESSION_TRANSACTED".equals(ackMode)) {
+			this.ackMode = Session.SESSION_TRANSACTED;
 		}
 	}
 
-	@Override
-	public void bulkDtoCreate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkCreate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
+	public void setClientId(String clientID) {
+		this.clientId = clientID;
 	}
 
-	@Override
-	public void bulkDtoCreateOrUpdate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkCreateOrUpdate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
+	public void setDurable(boolean durable) {
+		this.durable = durable;
 	}
 
-	@Override
-	public void bulkDtoDelete(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkDelete(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
+	public void setSubject(String subject) {
+		this.subject = subject;
 	}
 
-	@Override
-	public void bulkDtoUpdate(List<IndexObjectDto> indexObjectDto) throws IndexObjectException {
-		bulkUpdate(SearchLibrary.convertDtoListToEntityList(indexObjectDto));
+	public void setTransacted(boolean transacted) {
+		this.transacted = transacted;
 	}
 
-	@Override
-	public void bulkUpdate(List<?> entities) throws IndexObjectException {
-		for (Object entity : entities) {
-			update(entity);
-		}
+	public int getReceivedCount() {		
+		return receivedCount;
 	}
 
+
+	public void stopWhenReceivedCountReaches(int maxMessagesToRead) {
+		this.countToStop = maxMessagesToRead;
+	}
 }
